@@ -31,7 +31,8 @@ enum class ConnectionStatus {
 class BluetoothPrinterManager private constructor(context: Context) {
 
     private val context = context.applicationContext
-    private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+    private val bluetoothManager by lazy { context.getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager }
+    private val bluetoothAdapter: BluetoothAdapter? get() = bluetoothManager.adapter
     private var bluetoothSocket: BluetoothSocket? = null
     private var outputStream: OutputStream? = null
 
@@ -51,6 +52,9 @@ class BluetoothPrinterManager private constructor(context: Context) {
 
     private val _connectedDeviceName = MutableStateFlow<String?>(null)
     val connectedDeviceName: StateFlow<String?> = _connectedDeviceName
+
+    private val _connectedDeviceAddress = MutableStateFlow<String?>(null)
+    val connectedDeviceAddress: StateFlow<String?> = _connectedDeviceAddress
 
     private val _discoveredDevices = MutableStateFlow<List<BluetoothDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<BluetoothDevice>> = _discoveredDevices
@@ -99,7 +103,8 @@ class BluetoothPrinterManager private constructor(context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startDiscovery() {
-        if (!hasBluetoothPermission() || bluetoothAdapter == null) return
+        val adapter = bluetoothAdapter
+        if (!hasBluetoothPermission() || adapter == null) return
         
         if (!isReceiverRegistered) {
             // Register for broadcasts when a device is discovered.
@@ -114,16 +119,17 @@ class BluetoothPrinterManager private constructor(context: Context) {
         }
         
         _discoveredDevices.value = emptyList()
-        if (bluetoothAdapter.isDiscovering) {
-            bluetoothAdapter.cancelDiscovery()
+        if (adapter.isDiscovering == true) {
+            adapter.cancelDiscovery()
         }
-        bluetoothAdapter.startDiscovery()
+        adapter.startDiscovery()
     }
 
     @SuppressLint("MissingPermission")
     fun stopDiscovery() {
-        if (bluetoothAdapter?.isDiscovering == true) {
-            bluetoothAdapter.cancelDiscovery()
+        val adapter = bluetoothAdapter
+        if (adapter?.isDiscovering == true) {
+            adapter.cancelDiscovery()
         }
         if (isReceiverRegistered) {
             try {
@@ -161,11 +167,12 @@ class BluetoothPrinterManager private constructor(context: Context) {
 
     @SuppressLint("MissingPermission")
     fun getPairedDevices(): List<BluetoothDevice> {
-        if (!hasBluetoothPermission() || bluetoothAdapter == null) {
+        val adapter = bluetoothAdapter
+        if (!hasBluetoothPermission() || adapter == null) {
             return emptyList()
         }
         return try {
-            bluetoothAdapter.bondedDevices.toList()
+            adapter.bondedDevices.toList()
         } catch (e: SecurityException) {
             emptyList()
         }
@@ -230,6 +237,7 @@ class BluetoothPrinterManager private constructor(context: Context) {
                 
                 val deviceName = (try { device.name } catch (e: SecurityException) { null }) ?: device.address
                 _connectedDeviceName.value = deviceName
+                _connectedDeviceAddress.value = device.address
                 _connectionStatus.value = ConnectionStatus.CONNECTED
                 
                 // Persist the successfully connected printer address
@@ -249,6 +257,7 @@ class BluetoothPrinterManager private constructor(context: Context) {
     suspend fun disconnect() = withContext(Dispatchers.IO) {
         closeSocket()
         _connectedDeviceName.value = null
+        _connectedDeviceAddress.value = null
         _connectionStatus.value = ConnectionStatus.DISCONNECTED
     }
 
@@ -266,6 +275,7 @@ class BluetoothPrinterManager private constructor(context: Context) {
             e.printStackTrace()
         }
         bluetoothSocket = null
+        _connectedDeviceAddress.value = null
     }
 
     suspend fun printBytes(bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {

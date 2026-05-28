@@ -82,6 +82,12 @@ fun PrinterAppScreen(
             val savedAddress = printerManager.getSelectedPrinterAddress()
             if (savedAddress != null) {
                 selectedDevice = pairedDevices.find { it.address == savedAddress }
+                // Proactively connect to the saved printer on app launch if not already connected
+                if (selectedDevice != null && printerManager.connectionStatus.value == ConnectionStatus.DISCONNECTED) {
+                    coroutineScope.launch {
+                        printerManager.connect(selectedDevice!!)
+                    }
+                }
             }
         }
     }
