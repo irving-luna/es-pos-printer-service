@@ -72,8 +72,8 @@ fun PrinterAppScreen(
 
     var pairedDevices by remember { mutableStateOf(emptyList<BluetoothDevice>()) }
     var selectedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
-    var paperWidthMm by remember { mutableStateOf(58) }
-    var charsetEncoding by remember { mutableStateOf("CP850") }
+    var paperWidthMm by remember { mutableStateOf(printerManager.getPaperWidth()) }
+    var charsetEncoding by remember { mutableStateOf(printerManager.getCharsetEncoding()) }
 
     // Load paired devices and initial selected device
     LaunchedEffect(hasPermission) {
@@ -217,10 +217,7 @@ fun PrinterAppScreen(
                             if (dev.bondState == BluetoothDevice.BOND_NONE) {
                                 printerManager.pairDevice(dev)
                             } else {
-                                val success = printerManager.connect(dev)
-                                if (success) {
-                                    printerManager.saveSelectedPrinterAddress(dev.address)
-                                }
+                                printerManager.connect(dev)
                             }
                         }
                     },
@@ -234,8 +231,14 @@ fun PrinterAppScreen(
             PaperSettingsRow(
                 paperWidth = paperWidthMm,
                 encoding = charsetEncoding,
-                onWidthChange = { paperWidthMm = it },
-                onEncodingChange = { charsetEncoding = it }
+                onWidthChange = { 
+                    paperWidthMm = it
+                    printerManager.savePaperWidth(it)
+                },
+                onEncodingChange = { 
+                    charsetEncoding = it
+                    printerManager.saveCharsetEncoding(it)
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))

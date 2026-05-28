@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -178,6 +179,22 @@ class BluetoothPrinterManager private constructor(context: Context) {
         return sharedPreferences.getString("selected_printer_address", null)
     }
 
+    fun savePaperWidth(width: Int) {
+        sharedPreferences.edit().putInt("paper_width", width).apply()
+    }
+
+    fun getPaperWidth(): Int {
+        return sharedPreferences.getInt("paper_width", 58)
+    }
+
+    fun saveCharsetEncoding(encoding: String) {
+        sharedPreferences.edit().putString("charset_encoding", encoding).apply()
+    }
+
+    fun getCharsetEncoding(): String {
+        return sharedPreferences.getString("charset_encoding", "CP850") ?: "CP850"
+    }
+
     @SuppressLint("MissingPermission")
     suspend fun connect(device: BluetoothDevice): Boolean = withContext(Dispatchers.IO) {
         connectionMutex.withLock {
@@ -186,7 +203,11 @@ class BluetoothPrinterManager private constructor(context: Context) {
                 return@withLock false
             }
 
-            if (_connectionStatus.value == ConnectionStatus.CONNECTED && bluetoothSocket?.remoteDevice?.address == device.address) {
+            val currentSocket = bluetoothSocket
+            if (_connectionStatus.value == ConnectionStatus.CONNECTED && 
+                currentSocket != null && 
+                currentSocket.isConnected && 
+                currentSocket.remoteDevice?.address == device.address) {
                 return@withLock true
             }
 
@@ -194,17 +215,30 @@ class BluetoothPrinterManager private constructor(context: Context) {
             closeSocket()
 
             try {
-                bluetoothSocket = device.createRfcommSocketToServiceRecord(PRINTER_UUID)
+                Log.d("BluetoothPrinterManager", "Attempting to connect to ${device.address}")
+                bluetoothSocket = try {
+                    device.createRfcommSocketToServiceRecord(PRINTER_UUID)
+                } catch (e: Exception) {
+                    Log.w("BluetoothPrinterManager", "Secure socket failed, trying insecure")
+                    device.createInsecureRfcommSocketToServiceRecord(PRINTER_UUID)
+                }
+                
                 bluetoothAdapter?.cancelDiscovery()
-
+                
                 bluetoothSocket?.connect()
                 outputStream = bluetoothSocket?.outputStream
-
-                _connectedDeviceName.value = device.name ?: device.address
+                
+                val deviceName = (try { device.name } catch (e: SecurityException) { null }) ?: device.address
+                _connectedDeviceName.value = deviceName
                 _connectionStatus.value = ConnectionStatus.CONNECTED
+                
+                // Persist the successfully connected printer address
+                saveSelectedPrinterAddress(device.address)
+
+                Log.d("BluetoothPrinterManager", "Successfully connected to ${device.address}")
                 return@withLock true
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e("BluetoothPrinterManager", "Connection failed to ${device.address}", e)
                 closeSocket()
                 _connectionStatus.value = ConnectionStatus.ERROR
                 return@withLock false
