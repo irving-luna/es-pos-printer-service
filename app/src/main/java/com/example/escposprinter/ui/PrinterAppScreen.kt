@@ -67,14 +67,23 @@ fun PrinterAppScreen(
 
     val connectionStatus by printerManager.connectionStatus.collectAsState()
     val connectedDeviceName by printerManager.connectedDeviceName.collectAsState()
+    val discoveredDevices by printerManager.discoveredDevices.collectAsState()
+    val isScanning by printerManager.isScanning.collectAsState()
 
     var pairedDevices by remember { mutableStateOf(emptyList<BluetoothDevice>()) }
     var selectedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
     var paperWidthMm by remember { mutableStateOf(58) }
     var charsetEncoding by remember { mutableStateOf("CP850") }
 
-    // Load paired devices initially
-    LaunchedEffect(hasPermission, connectionStatus) {
+    // Stop discovery when leaving the screen
+    DisposableEffect(Unit) {
+        onDispose {
+            printerManager.stopDiscovery()
+        }
+    }
+
+    // Load paired devices initially and when scanning finishes or connection changes
+    LaunchedEffect(hasPermission, connectionStatus, isScanning) {
         if (hasPermission) {
             pairedDevices = printerManager.getPairedDevices()
         }
@@ -134,14 +143,24 @@ fun PrinterAppScreen(
                 ),
                 actions = {
                     IconButton(onClick = { 
-                        if (hasPermission) pairedDevices = printerManager.getPairedDevices()
-                        else onRequestPermissions()
+                        if (hasPermission) {
+                            pairedDevices = printerManager.getPairedDevices()
+                            if (!isScanning) printerManager.startDiscovery()
+                        } else onRequestPermissions()
                     }) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Refresh paired list",
-                            tint = MaterialTheme.colorScheme.secondary
-                        )
+                        if (isScanning) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                color = MaterialTheme.colorScheme.secondary,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = "Scan for devices",
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                        }
                     }
                 }
             )
@@ -177,15 +196,22 @@ fun PrinterAppScreen(
             // Printer Selector (if disconnected or error)
             if (connectionStatus == ConnectionStatus.DISCONNECTED || connectionStatus == ConnectionStatus.ERROR) {
                 DeviceSelectionSection(
-                    devices = pairedDevices,
+                    pairedDevices = pairedDevices,
+                    discoveredDevices = discoveredDevices,
                     selectedDevice = selectedDevice,
                     onDeviceSelect = { selectedDevice = it },
                     onConnectClick = { dev ->
                         coroutineScope.launch {
-                            printerManager.connect(dev)
+                            printerManager.stopDiscovery()
+                            if (dev.bondState == BluetoothDevice.BOND_NONE) {
+                                printerManager.pairDevice(dev)
+                            } else {
+                                printerManager.connect(dev)
+                            }
                         }
                     },
-                    isConnecting = connectionStatus == ConnectionStatus.CONNECTING
+                    isConnecting = connectionStatus == ConnectionStatus.CONNECTING,
+                    isScanning = isScanning
                 )
                 Spacer(modifier = Modifier.height(12.dp))
             }
@@ -400,11 +426,13 @@ fun ConnectionStatusCard(
 @SuppressLint("MissingPermission")
 @Composable
 fun DeviceSelectionSection(
-    devices: List<BluetoothDevice>,
+    pairedDevices: List<BluetoothDevice>,
+    discoveredDevices: List<BluetoothDevice>,
     selectedDevice: BluetoothDevice?,
     onDeviceSelect: (BluetoothDevice) -> Unit,
     onConnectClick: (BluetoothDevice) -> Unit,
-    isConnecting: Boolean
+    isConnecting: Boolean,
+    isScanning: Boolean
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -412,42 +440,71 @@ fun DeviceSelectionSection(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                "Paired Bluetooth Printers",
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Bluetooth Printers",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (isScanning) {
+                    Text(
+                        "Scanning...",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(8.dp))
 
-            if (devices.isEmpty()) {
+            if (pairedDevices.isEmpty() && discoveredDevices.isEmpty()) {
                 Text(
-                    "No paired devices found. Pair your thermal printer in Android system settings first.",
+                    "No devices found. Tap the search icon to scan or pair in system settings.",
                     fontSize = 13.sp,
-                    color = Color.LightGray
+                    color = Color.Gray
                 )
             } else {
-                LazyColumn(modifier = Modifier.heightIn(max = 120.dp)) {
-                    items(devices) { device ->
-                        val isSelected = selectedDevice?.address == device.address
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent)
-                                .clickable { onDeviceSelect(device) }
-                                .padding(vertical = 8.dp, horizontal = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = isSelected,
-                                onClick = { onDeviceSelect(device) },
-                                colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary)
+                LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                    if (pairedDevices.isNotEmpty()) {
+                        item {
+                            Text(
+                                "PAIRED DEVICES",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Gray,
+                                modifier = Modifier.padding(vertical = 4.dp)
                             )
-                            Column(modifier = Modifier.padding(start = 8.dp)) {
-                                Text(device.name ?: "Unknown Device", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                                Text(device.address, fontSize = 11.sp, color = Color.Gray, fontFamily = FontFamily.Monospace)
-                            }
+                        }
+                        items(pairedDevices) { device ->
+                            DeviceRow(
+                                device = device,
+                                isSelected = selectedDevice?.address == device.address,
+                                onSelect = { onDeviceSelect(device) }
+                            )
+                        }
+                    }
+
+                    if (discoveredDevices.isNotEmpty()) {
+                        item {
+                            Text(
+                                "DISCOVERED DEVICES",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Gray,
+                                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                            )
+                        }
+                        items(discoveredDevices) { device ->
+                            DeviceRow(
+                                device = device,
+                                isSelected = selectedDevice?.address == device.address,
+                                onSelect = { onDeviceSelect(device) }
+                            )
                         }
                     }
                 }
@@ -463,12 +520,47 @@ fun DeviceSelectionSection(
                     if (isConnecting) {
                         CircularProgressIndicator(modifier = Modifier.size(20.dp), color = MaterialTheme.colorScheme.onPrimary)
                     } else {
-                        Icon(imageVector = Icons.Default.Check, contentDescription = null)
+                        val isPaired = selectedDevice?.bondState == BluetoothDevice.BOND_BONDED
+                        Icon(
+                            imageVector = if (isPaired) Icons.Default.Check else Icons.Default.Add,
+                            contentDescription = null
+                        )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Connect Selected Printer", color = MaterialTheme.colorScheme.onPrimary)
+                        Text(
+                            if (isPaired) "Connect Selected Printer" else "Pair and Connect Printer",
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@SuppressLint("MissingPermission")
+@Composable
+fun DeviceRow(
+    device: BluetoothDevice,
+    isSelected: Boolean,
+    onSelect: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(4.dp))
+            .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent)
+            .clickable { onSelect() }
+            .padding(vertical = 4.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(
+            selected = isSelected,
+            onClick = onSelect,
+            colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary)
+        )
+        Column(modifier = Modifier.padding(start = 8.dp)) {
+            Text(device.name ?: "Unknown Device", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Text(device.address, fontSize = 11.sp, color = Color.Gray, fontFamily = FontFamily.Monospace)
         }
     }
 }

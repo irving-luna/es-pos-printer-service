@@ -4,7 +4,10 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -34,7 +37,91 @@ class BluetoothPrinterManager(private val context: Context) {
     private val _connectedDeviceName = MutableStateFlow<String?>(null)
     val connectedDeviceName: StateFlow<String?> = _connectedDeviceName
 
+    private val _discoveredDevices = MutableStateFlow<List<BluetoothDevice>>(emptyList())
+    val discoveredDevices: StateFlow<List<BluetoothDevice>> = _discoveredDevices
+
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning
+
+    private var isReceiverRegistered = false
+
+    private val bluetoothReceiver = object : BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                BluetoothDevice.ACTION_FOUND -> {
+                    val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    device?.let {
+                        val currentList = _discoveredDevices.value
+                        if (!currentList.any { d -> d.address == it.address }) {
+                            _discoveredDevices.value = currentList + it
+                        }
+                    }
+                }
+                BluetoothAdapter.ACTION_DISCOVERY_STARTED -> {
+                    _isScanning.value = true
+                }
+                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                    _isScanning.value = false
+                }
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                    val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+                    if (state == BluetoothDevice.BOND_BONDED) {
+                        // Refresh lists or notify
+                        _discoveredDevices.value = _discoveredDevices.value.filter { it.address != device?.address }
+                    }
+                }
+            }
+        }
+    }
+
     private val PRINTER_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+
+    @SuppressLint("MissingPermission")
+    fun startDiscovery() {
+        if (!hasBluetoothPermission() || bluetoothAdapter == null) return
+        
+        if (!isReceiverRegistered) {
+            // Register for broadcasts when a device is discovered.
+            val filter = IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_FOUND)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            }
+            context.registerReceiver(bluetoothReceiver, filter)
+            isReceiverRegistered = true
+        }
+        
+        _discoveredDevices.value = emptyList()
+        if (bluetoothAdapter.isDiscovering) {
+            bluetoothAdapter.cancelDiscovery()
+        }
+        bluetoothAdapter.startDiscovery()
+    }
+
+    @SuppressLint("MissingPermission")
+    fun stopDiscovery() {
+        if (bluetoothAdapter?.isDiscovering == true) {
+            bluetoothAdapter.cancelDiscovery()
+        }
+        if (isReceiverRegistered) {
+            try {
+                context.unregisterReceiver(bluetoothReceiver)
+            } catch (e: IllegalArgumentException) {
+                // Receiver not registered
+            }
+            isReceiverRegistered = false
+        }
+        _isScanning.value = false
+    }
+
+    @SuppressLint("MissingPermission")
+    fun pairDevice(device: BluetoothDevice): Boolean {
+        if (!hasBluetoothPermission()) return false
+        return device.createBond()
+    }
 
     fun isBluetoothSupported(): Boolean {
         return bluetoothAdapter != null
