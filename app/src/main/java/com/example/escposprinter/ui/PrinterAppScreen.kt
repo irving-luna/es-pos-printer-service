@@ -75,6 +75,17 @@ fun PrinterAppScreen(
     var paperWidthMm by remember { mutableStateOf(58) }
     var charsetEncoding by remember { mutableStateOf("CP850") }
 
+    // Load paired devices and initial selected device
+    LaunchedEffect(hasPermission) {
+        if (hasPermission) {
+            pairedDevices = printerManager.getPairedDevices()
+            val savedAddress = printerManager.getSelectedPrinterAddress()
+            if (savedAddress != null) {
+                selectedDevice = pairedDevices.find { it.address == savedAddress }
+            }
+        }
+    }
+
     // Stop discovery when leaving the screen
     DisposableEffect(Unit) {
         onDispose {
@@ -82,8 +93,8 @@ fun PrinterAppScreen(
         }
     }
 
-    // Load paired devices initially and when scanning finishes or connection changes
-    LaunchedEffect(hasPermission, connectionStatus, isScanning) {
+    // Refresh paired devices when scanning finishes or connection changes
+    LaunchedEffect(connectionStatus, isScanning) {
         if (hasPermission) {
             pairedDevices = printerManager.getPairedDevices()
         }
@@ -206,7 +217,10 @@ fun PrinterAppScreen(
                             if (dev.bondState == BluetoothDevice.BOND_NONE) {
                                 printerManager.pairDevice(dev)
                             } else {
-                                printerManager.connect(dev)
+                                val success = printerManager.connect(dev)
+                                if (success) {
+                                    printerManager.saveSelectedPrinterAddress(dev.address)
+                                }
                             }
                         }
                     },

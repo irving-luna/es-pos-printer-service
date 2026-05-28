@@ -13,6 +13,8 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.OutputStream
@@ -25,11 +27,23 @@ enum class ConnectionStatus {
     ERROR
 }
 
-class BluetoothPrinterManager(private val context: Context) {
+class BluetoothPrinterManager private constructor(context: Context) {
 
+    private val context = context.applicationContext
     private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
     private var bluetoothSocket: BluetoothSocket? = null
     private var outputStream: OutputStream? = null
+
+    companion object {
+        @Volatile
+        private var INSTANCE: BluetoothPrinterManager? = null
+
+        fun getInstance(context: Context): BluetoothPrinterManager {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: BluetoothPrinterManager(context).also { INSTANCE = it }
+            }
+        }
+    }
 
     private val _connectionStatus = MutableStateFlow(ConnectionStatus.DISCONNECTED)
     val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus
@@ -42,6 +56,10 @@ class BluetoothPrinterManager(private val context: Context) {
 
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning
+
+    private val sharedPreferences = context.getSharedPreferences("printer_prefs", Context.MODE_PRIVATE)
+    private val connectionMutex = Mutex()
+    private val printMutex = Mutex()
 
     private var isReceiverRegistered = false
 
@@ -152,31 +170,45 @@ class BluetoothPrinterManager(private val context: Context) {
         }
     }
 
+    fun saveSelectedPrinterAddress(address: String?) {
+        sharedPreferences.edit().putString("selected_printer_address", address).apply()
+    }
+
+    fun getSelectedPrinterAddress(): String? {
+        return sharedPreferences.getString("selected_printer_address", null)
+    }
+
     @SuppressLint("MissingPermission")
     suspend fun connect(device: BluetoothDevice): Boolean = withContext(Dispatchers.IO) {
-        if (!hasBluetoothPermission()) {
-            _connectionStatus.value = ConnectionStatus.ERROR
-            return@withContext false
-        }
+        connectionMutex.withLock {
+            if (!hasBluetoothPermission()) {
+                _connectionStatus.value = ConnectionStatus.ERROR
+                return@withLock false
+            }
 
-        _connectionStatus.value = ConnectionStatus.CONNECTING
-        disconnect()
+            if (_connectionStatus.value == ConnectionStatus.CONNECTED && bluetoothSocket?.remoteDevice?.address == device.address) {
+                return@withLock true
+            }
 
-        try {
-            bluetoothSocket = device.createRfcommSocketToServiceRecord(PRINTER_UUID)
-            bluetoothAdapter?.cancelDiscovery()
-            
-            bluetoothSocket?.connect()
-            outputStream = bluetoothSocket?.outputStream
-            
-            _connectedDeviceName.value = device.name ?: device.address
-            _connectionStatus.value = ConnectionStatus.CONNECTED
-            return@withContext true
-        } catch (e: Exception) {
-            e.printStackTrace()
+            _connectionStatus.value = ConnectionStatus.CONNECTING
             closeSocket()
-            _connectionStatus.value = ConnectionStatus.ERROR
-            return@withContext false
+
+            try {
+                bluetoothSocket = device.createRfcommSocketToServiceRecord(PRINTER_UUID)
+                bluetoothAdapter?.cancelDiscovery()
+
+                bluetoothSocket?.connect()
+                outputStream = bluetoothSocket?.outputStream
+
+                _connectedDeviceName.value = device.name ?: device.address
+                _connectionStatus.value = ConnectionStatus.CONNECTED
+                return@withLock true
+            } catch (e: Exception) {
+                e.printStackTrace()
+                closeSocket()
+                _connectionStatus.value = ConnectionStatus.ERROR
+                return@withLock false
+            }
         }
     }
 
@@ -203,19 +235,21 @@ class BluetoothPrinterManager(private val context: Context) {
     }
 
     suspend fun printBytes(bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
-        val stream = outputStream
-        if (_connectionStatus.value != ConnectionStatus.CONNECTED || stream == null) {
-            return@withContext false
-        }
-        try {
-            stream.write(bytes)
-            stream.flush()
-            return@withContext true
-        } catch (e: IOException) {
-            e.printStackTrace()
-            _connectionStatus.value = ConnectionStatus.ERROR
-            closeSocket()
-            return@withContext false
+        printMutex.withLock {
+            val stream = outputStream
+            if (_connectionStatus.value != ConnectionStatus.CONNECTED || stream == null) {
+                return@withLock false
+            }
+            try {
+                stream.write(bytes)
+                stream.flush()
+                return@withLock true
+            } catch (e: IOException) {
+                e.printStackTrace()
+                _connectionStatus.value = ConnectionStatus.ERROR
+                closeSocket()
+                return@withLock false
+            }
         }
     }
 }

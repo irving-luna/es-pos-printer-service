@@ -36,7 +36,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        printerManager = BluetoothPrinterManager(this)
+        printerManager = BluetoothPrinterManager.getInstance(this)
 
         setContent {
             EscPosPrinterTheme {
